@@ -1,40 +1,36 @@
-global response_404_unique:table[addr] of set[string];
-global response_404:table[addr] of count;
-global response:table[addr] of count;
-event http_reply(c:connection,version:string,code:count,reason:string)
+event http_reply(c: connection, version: string, code: count, reason: string) 
 {
-local ip=c$id$orig_h;
-local uri=c$http$uri;
-local status=c$http$status_code;
-if(ip in response)
-{
-response[ip]+=1;
-if(status==404)
-{
-response_404[ip]+=1;
-add response_404_unique[ip][uri];
+    SumStats::observe("count of resp",  
+                      SumStats::Key($host=c$id$orig_h), 
+                      SumStats::Observation($num=1));
+    if (code == 404) {
+        SumStats::observe("count of 404 resp", 
+                      SumStats::Key($host=c$id$orig_h), 
+                      SumStats::Observation($num=1));
+        SumStats::observe("count of uni 404 resp", 
+                      SumStats::Key($host=c$id$orig_h), 
+                      SumStats::Observation($str=c$http$uri));
+    }
 }
-}
-else
+
+
+event zeek_init()
 {
-response[ip]=1;
-if(status==404)
-{
-response_404[ip]=1;
-response_404_unique[ip]=set(uri);
-}
-}
-}
-event zeek_done()
-{
-for([ip],p in response)
-{
-local sum=p;
-local sum_404=response_404[ip];
-local sum_404_unique=|response_404_unique[ip]|;
-if(sum_404>2&&sum_404*5>sum&&sum_404_unique*2>sum_404)
-{
-print ip," is a scanner with ",sum_404," scan attemps on ",sum_404_unique," urls";
-}
-}
+    local r1 = SumStats::Reducer($stream="count of resp", 
+                                 $apply=set(SumStats::SUM));
+    local r2 = SumStats::Reducer($stream="count of 404 resp", 
+                                 $apply=set(SumStats::SUM));
+    local r3 = SumStats::Reducer($stream="count of uni 404 resp", 
+                                 $apply=set(SumStats::UNIQUE));
+    SumStats::create([$name = "detect attacker through 404 resp",
+                      $epoch = 10min,
+                      $reducers = set(r1,r2,r3),
+                      $epoch_result(ts: time, key: SumStats::Key, result: SumStats::Result) =
+                        {
+                            local ratio1 : double = result["count of 404 resp"]$sum / result["count of resp"]$sum;
+                            local ratio2 : double = result["count of uni 404 resp"]$unique / result["count of 404 resp"]$sum;
+                            if (result["count of 404 resp"]$sum > 2 && ratio1 > 0.2 && ratio2 > 0.5) {
+                                print fmt("%s is a scanner with %.0f scan attemps on %.0f urls", key$host, result["count of 404 resp"]$sum, result["count of uni 404 resp"]$sum);
+                        }
+                    }]);
 }
